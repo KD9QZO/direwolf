@@ -1,7 +1,7 @@
 //
 //    This file is part of Dire Wolf, an amateur radio packet TNC.
 //
-//    Copyright (C) 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018  John Langner, WB2OSZ
+//    Copyright (C) 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2021  John Langner, WB2OSZ
 //
 //    This program is free software: you can redistribute it and/or modify
 //    it under the terms of the GNU General Public License as published by
@@ -63,7 +63,7 @@
 #include "tt_text.h"
 #include "ax25_link.h"
 
-#ifdef USE_CM108		// Linux only
+#if USE_CM108		// Current Linux or Windows only
 #include "cm108.h"
 #endif
 
@@ -852,9 +852,18 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 
 	memset (p_misc_config, 0, sizeof(struct misc_config_s));
 	p_misc_config->agwpe_port = DEFAULT_AGWPE_PORT;
-	p_misc_config->kiss_port = DEFAULT_KISS_PORT;
+
+	for (int i=0; i<MAX_KISS_TCP_PORTS; i++) {
+	  p_misc_config->kiss_port[i] = 0;	// entry not used.
+	  p_misc_config->kiss_chan[i] = -1;
+	}
+	p_misc_config->kiss_port[0] = DEFAULT_KISS_PORT;
+	p_misc_config->kiss_chan[0] = -1;	// all channels.
+
 	p_misc_config->enable_kiss_pt = 0;				/* -p option */
 	p_misc_config->kiss_copy = 0;
+
+	p_misc_config->dns_sd_enabled = 1;
 
 	/* Defaults from http://info.aprs.net/index.php?title=SmartBeaconing */
 
@@ -1337,7 +1346,7 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 								// Will make more precise in afsk demod init.
 	      p_audio_config->achan[channel].mark_freq = 2083;	// Actually 2083.3 - logic 1.
 	      p_audio_config->achan[channel].space_freq = 1563;	// Actually 1562.5 - logic 0.
-	      // ? strlcpy (p_audio_config->achan[channel].profiles, "D", sizeof(p_audio_config->achan[channel].profiles));
+	      // ? strlcpy (p_audio_config->achan[channel].profiles, "A", sizeof(p_audio_config->achan[channel].profiles));
 	    }
 	    else {
               p_audio_config->achan[channel].modem_type = MODEM_SCRAMBLE;
@@ -1845,9 +1854,9 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 	    }
 	    else if (strcasecmp(t, "CM108") == 0) {
 
-/* CM108 - GPIO of USB sound card. case, Linux only. */
+/* CM108 - GPIO of USB sound card. case, Linux and Windows only. */
 
-#ifdef USE_CM108
+#if USE_CM108
 
 	      if (ot != OCTYPE_PTT) {
 		// Future project:  Allow DCD and CON via the same device.
@@ -1884,6 +1893,16 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 	          p_audio_config->achan[channel].octrl[ot].out_gpio_num = atoi(t);
 		  p_audio_config->achan[channel].octrl[ot].ptt_invert = 0;
 	        }
+#if __WIN32__
+	        else if (*t == '\\') {
+	          strlcpy (p_audio_config->achan[channel].octrl[ot].ptt_device, t, sizeof(p_audio_config->achan[channel].octrl[ot].ptt_device));
+		}
+		else {
+	          text_color_set(DW_COLOR_ERROR);
+	          dw_printf ("Config file line %d: Found \"%s\" when expecting GPIO number or device name like \\\\?\\hid#vid_0d8c&... .\n", line, t);
+	          continue;
+	        }
+#else
 	        else if (*t == '/') {
 	          strlcpy (p_audio_config->achan[channel].octrl[ot].ptt_device, t, sizeof(p_audio_config->achan[channel].octrl[ot].ptt_device));
 		}
@@ -1892,6 +1911,7 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 	          dw_printf ("Config file line %d: Found \"%s\" when expecting GPIO number or device name like /dev/hidraw1.\n", line, t);
 	          continue;
 	        }
+#endif
 	      }
 	      if (p_audio_config->achan[channel].octrl[ot].out_gpio_num < 1 || p_audio_config->achan[channel].octrl[ot].out_gpio_num > 8) {
 	          text_color_set(DW_COLOR_ERROR);
@@ -1903,22 +1923,23 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 	        text_color_set(DW_COLOR_ERROR);
 	        dw_printf ("Config file line %d: Could not determine USB Audio GPIO PTT device for audio output %s.\n", line,
 					p_audio_config->adev[ACHAN2ADEV(channel)].adevice_out);
+#if __WIN32__
+	        dw_printf ("You must explicitly mention a HID path.\n");
+#else
 	        dw_printf ("You must explicitly mention a device name such as /dev/hidraw1.\n");
-	        dw_printf ("See User Guide for details.\n");
+#endif
+	        dw_printf ("Run \"cm108\" utility to get a list.\n");
+	        dw_printf ("See Interface Guide for details.\n");
 	        continue;
 	      }
 	      p_audio_config->achan[channel].octrl[ot].ptt_method = PTT_METHOD_CM108;
 
 #else
-#if __WIN32__
-	      text_color_set(DW_COLOR_ERROR);
-	      dw_printf ("Config file line %d: CM108 USB Audio GPIO PTT is not available for Windows.\n", line);
-#else
 	      text_color_set(DW_COLOR_ERROR);
 	      dw_printf ("Config file line %d: %s with CM108 is only available when USB Audio GPIO support is enabled.\n", line, otname);
 	      dw_printf ("You must rebuild direwolf with CM108 Audio Adapter GPIO PTT support.\n");
-	      dw_printf ("See User Guide for details.\n");
-#endif
+	      dw_printf ("See Interface Guide for details.\n");
+
 	      exit (EXIT_FAILURE);
 #endif
 	    }
@@ -4475,27 +4496,89 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 	  }
 
 /*
- * KISSPORT 		- Port number for KISS over IP. 
+ * KISSPORT port [ chan ]		- Port number for KISS over IP.
  */
 
+	// Previously we allowed only a single TCP port for KISS.
+	// An increasing number of people want to run multiple radios.
+	// Unfortunately, most applications don't know how to deal with multi-radio TNCs.
+	// They ignore the channel on receive and always transmit to channel 0.
+	// Running multiple instances of direwolf is a work-around but this leads to
+	// more complex configuration and we lose the cross-channel digipeating capability.
+	// In release 1.7 we add a new feature to assign a single radio channel to a TCP port.
+	// e.g.
+	//	KISSPORT 8001		# default, all channels.  Radio channel = KISS channel.
+	//
+	//	KISSPORT 7000 0		# Only radio channel 0 for receive.
+	//				# Transmit to radio channel 0, ignoring KISS channel.
+	//
+	//	KISSPORT 7001 1		# Only radio channel 1 for receive.  KISS channel set to 0.
+	//				# Transmit to radio channel 1, ignoring KISS channel.
+
+// FIXME
 	  else if (strcasecmp(t, "KISSPORT") == 0) {
 	    int n;
+	    int tcp_port = 0;
+	    int chan = -1;	// optional.  default to all if not specified.
 	    t = split(NULL,0);
 	    if (t == NULL) {
 	      text_color_set(DW_COLOR_ERROR);
-	      dw_printf ("Line %d: Missing port number for KISSPORT command.\n", line);
+	      dw_printf ("Line %d: Missing TCP port number for KISSPORT command.\n", line);
 	      continue;
 	    }
 	    n = atoi(t);
             if ((n >= MIN_IP_PORT_NUMBER && n <= MAX_IP_PORT_NUMBER) || n == 0) {
-	      p_misc_config->kiss_port = n;
+	      tcp_port = n;
 	    }
 	    else {
-	      p_misc_config->kiss_port = DEFAULT_KISS_PORT;
 	      text_color_set(DW_COLOR_ERROR);
-              dw_printf ("Line %d: Invalid port number for KISS TCPIP Socket Interface. Using %d.\n", 
-			line, p_misc_config->kiss_port);
+              dw_printf ("Line %d: Invalid TCP port number for KISS TCPIP Socket Interface.\n", line);
+              dw_printf ("Use something in the range of %d to %d.\n", MIN_IP_PORT_NUMBER, MAX_IP_PORT_NUMBER);
+	      continue;
    	    }
+
+	    t = split(NULL,0);
+	    if (t != NULL) {
+	      chan = atoi(t);
+	      if (chan < 0 || chan >= MAX_CHANS) {
+	        text_color_set(DW_COLOR_ERROR);
+	        dw_printf ("Line %d: Invalid channel %d for KISSPORT command.  Must be in range 0 thru %d.\n", line, chan, MAX_CHANS-1);
+	        continue;
+	      }
+	    }
+
+	    // "KISSPORT 0" is used to remove the default entry.
+
+	    if (tcp_port == 0) {
+	      p_misc_config->kiss_port[0] = 0;		// Should all be wiped out?
+	    }
+	    else {
+
+	      // Try to find an empty slot.
+	      // A duplicate TCP port number will overwrite the previous value.
+
+	      int slot = -1;
+	      for (int i = 0; i < MAX_KISS_TCP_PORTS && slot == -1; i++) {
+	        if (p_misc_config->kiss_port[i] == tcp_port) {
+	          slot = i;
+	          if ( ! (slot == 0 && tcp_port == DEFAULT_KISS_PORT)) {
+	            text_color_set(DW_COLOR_ERROR);
+	            dw_printf ("Line %d: Warning: Duplicate TCP port %d will overwrite previous value.\n", line, tcp_port);
+	          }
+	        }
+	        else if (p_misc_config->kiss_port[i] == 0) {
+	          slot = i;
+	        }
+	      }
+	      if (slot >= 0) {
+	        p_misc_config->kiss_port[slot] = tcp_port;
+	        p_misc_config->kiss_chan[slot] = chan;
+	      }
+	      else {
+	        text_color_set(DW_COLOR_ERROR);
+	        dw_printf ("Line %d: Too many KISSPORT commands.\n", line);
+	      }
+	    }
 	  }
 
 /*
@@ -4562,6 +4645,43 @@ void config_init (char *fname, struct audio_s *p_audio_config,
 	  else if (strcasecmp(t, "KISSCOPY") == 0) {
 	    p_misc_config->kiss_copy = 1;
 	  }
+
+
+/*
+ * DNSSD 		- Enable or disable (1/0) dns-sd, DNS Service Discovery announcements
+ * DNSSDNAME            - Set DNS-SD service name, defaults to "Dire Wolf on <hostname>"
+ */
+
+	  else if (strcasecmp(t, "DNSSD") == 0) {
+	    int n;
+	    t = split(NULL,0);
+	    if (t == NULL) {
+	      text_color_set(DW_COLOR_ERROR);
+	      dw_printf ("Line %d: Missing integer value for DNSSD command.\n", line);
+	      continue;
+	    }
+	    n = atoi(t);
+	    if (n == 0 || n == 1) {
+	      p_misc_config->dns_sd_enabled = n;
+	    } else {
+	      p_misc_config->dns_sd_enabled = 0;
+	      text_color_set(DW_COLOR_ERROR);
+	      dw_printf ("Line %d: Invalid integer value for DNSSD. Disabling dns-sd.\n", line);
+	    }
+	  }
+
+	  else if (strcasecmp(t, "DNSSDNAME") == 0) {
+	    t = split(NULL, 1);
+	    if (t == NULL) {
+	      text_color_set(DW_COLOR_ERROR);
+	      dw_printf ("Line %d: Missing service name for DNSSDNAME.\n", line);
+	      continue;
+	    }
+	    else {
+	      strlcpy(p_misc_config->dns_sd_name, t, sizeof(p_misc_config->dns_sd_name));
+	    }
+	  }
+
 
 
 /*
@@ -5273,6 +5393,8 @@ static int beacon_options(char *cmd, struct beacon_s *b, int line, struct audio_
 	b->freq = G_UNKNOWN;
 	b->tone = G_UNKNOWN;
 	b->offset = G_UNKNOWN;
+	b->source = NULL;
+	b->dest = NULL;
 
 	while ((t = split(NULL,0)) != NULL) {
 
@@ -5342,6 +5464,17 @@ static int beacon_options(char *cmd, struct beacon_s *b, int line, struct audio_
 	       }
 	       b->sendto_type = SENDTO_XMIT;
 	       b->sendto_chan = n;
+	    }
+	  }
+	  else if (strcasecmp(keyword, "SOURCE") == 0) {
+	    b->source = strdup(value);
+	    for (p = b->source; *p != '\0'; p++) {
+	      if (islower(*p)) {
+	        *p = toupper(*p);	/* silently force upper case. */
+	      }
+	    }
+	    if (strlen(b->source) > 9) {
+	       b->source[9] = '\0';
 	    }
 	  }
 	  else if (strcasecmp(keyword, "DEST") == 0) {

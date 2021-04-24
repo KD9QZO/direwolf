@@ -4,12 +4,13 @@ project(direwolf)
 
 # configure version
 set(direwolf_VERSION_MAJOR "1")
-set(direwolf_VERSION_MINOR "6")
+set(direwolf_VERSION_MINOR "7")
 set(direwolf_VERSION_PATCH "0")
-set(direwolf_VERSION_SUFFIX "")
+set(direwolf_VERSION_SUFFIX "Development")
 
 # options
-option(FORCE_SSE "Compile with SSE instruction only" OFF)
+# See Issue 297.
+option(FORCE_SSE "Compile with SSE instruction only" ON)
 option(FORCE_SSSE3 "Compile with SSSE3 instruction only" OFF)
 option(FORCE_SSE41 "Compile with SSE4.1 instruction only" OFF)
 option(OPTIONAL_TEST "Compile optional test (might be broken)" OFF)
@@ -71,6 +72,7 @@ set(CUSTOM_SRC_DIR "${CMAKE_SOURCE_DIR}/src")
 set(CUSTOM_EXTERNAL_DIR "${CMAKE_SOURCE_DIR}/external")
 set(CUSTOM_MISC_DIR "${CUSTOM_EXTERNAL_DIR}/misc")
 set(CUSTOM_REGEX_DIR "${CUSTOM_EXTERNAL_DIR}/regex")
+set(CUSTOM_HIDAPI_DIR "${CUSTOM_EXTERNAL_DIR}/hidapi")
 set(CUSTOM_GEOTRANZ_DIR "${CUSTOM_EXTERNAL_DIR}/geotranz")
 set(CUSTOM_DATA_DIR "${CMAKE_SOURCE_DIR}/data")
 set(CUSTOM_SCRIPTS_DIR "${CMAKE_SOURCE_DIR}/scripts")
@@ -143,6 +145,10 @@ elseif(${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")
   configure_file("${CMAKE_SOURCE_DIR}/cmake/cpack/${CMAKE_PROJECT_NAME}.desktop.in"
     "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.desktop" @ONLY)
 
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "OpenBSD")
+  set(OPENBSD TRUE)
+  set(HAVE_SNDIO TRUE)
+
 elseif(APPLE)
   if("${CMAKE_OSX_DEPLOYMENT_TARGET}" STREQUAL "")
     message(STATUS "Build for macOS target: local version")
@@ -155,6 +161,10 @@ elseif(APPLE)
 
   set(CMAKE_MACOSX_RPATH ON)
   message(STATUS "RPATH support: ${CMAKE_MACOSX_RPATH}")
+
+  # just blindly enable dns-sd
+  set(USE_MACOS_DNSSD ON)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_MACOS_DNSSD")
 
 elseif (WIN32)
   if(NOT VS2015 AND NOT VS2017)
@@ -246,6 +256,20 @@ else()
 endif(WIN32 OR CYGWIN)
 
 # requirements
+
+include(CheckSymbolExists)
+# Some platforms provide their own strlcpy & strlcat. (BSD, MacOSX)
+# Others don't so we provide our own. (Most, but not all Linux)
+# Define the preprocessor macro so libgps does not supply its own version.
+check_symbol_exists(strlcpy string.h HAVE_STRLCPY)
+if(HAVE_STRLCPY)
+    add_compile_options(-DHAVE_STRLCPY)
+endif()
+check_symbol_exists(strlcat string.h HAVE_STRLCAT)
+if(HAVE_STRLCAT)
+    add_compile_options(-DHAVE_STRLCAT)
+endif()
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
@@ -276,6 +300,17 @@ if(LINUX)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_CM108")
   endif()
 
+  find_package(Avahi)
+  if(AVAHI_CLIENT_FOUND)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_AVAHI_CLIENT")
+  endif()
+
+elseif (HAVE_SNDIO)
+  find_package(sndio REQUIRED)
+  if(SNDIO_FOUND)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_SNDIO")
+  endif()
+
 elseif (NOT WIN32 AND NOT CYGWIN)
   find_package(Portaudio REQUIRED)
   if(PORTAUDIO_FOUND)
@@ -287,8 +322,12 @@ else()
   set(ALSA_LIBRARIES "")
   set(UDEV_INCLUDE_DIRS "")
   set(UDEV_LIBRARIES "")
+  # Version 1.7 supports CM108/CM119 GPIO PTT for Windows.
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_CM108")
   set(PORTAUDIO_INCLUDE_DIRS "")
   set(PORTAUDIO_LIBRARIES "")
+  set(SNDIO_INCLUDE_DIRS "")
+  set(SNDIO_LIBRARIES "")
 endif()
 
 # manage and fetch new data
@@ -297,6 +336,7 @@ add_subdirectory(data)
 # external libraries
 add_subdirectory(${CUSTOM_GEOTRANZ_DIR})
 add_subdirectory(${CUSTOM_REGEX_DIR})
+add_subdirectory(${CUSTOM_HIDAPI_DIR})
 add_subdirectory(${CUSTOM_MISC_DIR})
 
 # direwolf source code and utilities

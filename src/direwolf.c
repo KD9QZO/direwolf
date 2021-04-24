@@ -1,7 +1,7 @@
 //
 //    This file is part of Dire Wolf, an amateur radio packet TNC.
 //
-//    Copyright (C) 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2019, 2020  John Langner, WB2OSZ
+//    Copyright (C) 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2019, 2020, 2021  John Langner, WB2OSZ
 //
 //    This program is free software: you can redistribute it and/or modify
 //    it under the terms of the GNU General Public License as published by
@@ -67,9 +67,8 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
-#ifdef __OpenBSD__
-#include <soundcard.h>
-#elif __APPLE__
+#if USE_SNDIO || __APPLE__
+// no need to include <soundcard.h>
 #else
 #include <sys/soundcard.h>
 #endif
@@ -125,6 +124,7 @@
 #include "dtime_now.h"
 #include "fx25.h"
 #include "dwsock.h"
+#include "dns_sd_dw.h"
 
 
 //static int idx_decoded = 0;
@@ -193,7 +193,6 @@ int main (int argc, char *argv[])
 	//int eof;
 	int j;
 	char config_file[100];
-	int xmit_calibrate_option = 0;
 	int enable_pseudo_terminal = 0;
 	struct digi_config_s digi_config;
 	struct cdigi_config_s cdigi_config;
@@ -223,12 +222,16 @@ int main (int argc, char *argv[])
 	int d_h_opt = 0;	/* "-d h" option for hamlib debugging.  Repeat for more detail */
 #endif
 	int d_x_opt = 1;	/* "-d x" option for FX.25.  Default minimal. Repeat for more detail.  -qx to silence. */
+	int aprstt_debug = 0;	/* "-d d" option for APRStt (think Dtmf) debug. */
 
 	int E_tx_opt = 0;		/* "-E n" Error rate % for clobbering trasmit frames. */
 	int E_rx_opt = 0;		/* "-E Rn" Error rate % for clobbering receive frames. */
 
 	float e_recv_ber = 0.0;		/* Receive Bit Error Rate (BER). */
 	int X_fx25_xmit_enable = 0;	/* FX.25 transmit enable. */
+
+	char x_opt_mode = ' ';		/* "-x N" option for transmitting calibration tones. */
+	int x_opt_chan = 0;		/* Split into 2 parts.  Mode e.g.  m, a, and optional channel. */
 
 	strlcpy(l_opt_logdir, "", sizeof(l_opt_logdir));
 	strlcpy(L_opt_logfile, "", sizeof(L_opt_logfile));
@@ -288,11 +291,11 @@ int main (int argc, char *argv[])
 	text_color_init(t_opt);
 	text_color_set(DW_COLOR_INFO);
 	//dw_printf ("Dire Wolf version %d.%d (%s) Beta Test 4\n", MAJOR_VERSION, MINOR_VERSION, __DATE__);
-	//dw_printf ("Dire Wolf DEVELOPMENT version %d.%d %s (%s)\n", MAJOR_VERSION, MINOR_VERSION, "G", __DATE__);
-	dw_printf ("Dire Wolf version %d.%d\n", MAJOR_VERSION, MINOR_VERSION);
+	dw_printf ("Dire Wolf DEVELOPMENT version %d.%d %s (%s)\n", MAJOR_VERSION, MINOR_VERSION, "A", __DATE__);
+	//dw_printf ("Dire Wolf version %d.%d\n", MAJOR_VERSION, MINOR_VERSION);
 
 
-#if defined(ENABLE_GPSD) || defined(USE_HAMLIB) || defined(USE_CM108)
+#if defined(ENABLE_GPSD) || defined(USE_HAMLIB) || defined(USE_CM108) || USE_AVAHI_CLIENT || USE_MACOS_DNSSD
 	dw_printf ("Includes optional support for: ");
 #if defined(ENABLE_GPSD)
 	dw_printf (" gpsd");
@@ -302,6 +305,9 @@ int main (int argc, char *argv[])
 #endif
 #if defined(USE_CM108)
 	dw_printf (" cm108-ptt");
+#endif
+#if (USE_AVAHI_CLIENT|USE_MACOS_DNSSD)
+	dw_printf (" dns-sd");
 #endif
 	dw_printf ("\n");
 #endif
@@ -387,7 +393,7 @@ int main (int argc, char *argv[])
 
 	  /* ':' following option character means arg is required. */
 
-          c = getopt_long(argc, argv, "hP:B:gjJD:U:c:pxr:b:n:d:q:t:ul:L:Sa:E:T:e:X:A",
+          c = getopt_long(argc, argv, "hP:B:gjJD:U:c:px:r:b:n:d:q:t:ul:L:Sa:E:T:e:X:A",
                         long_options, &option_index);
           if (c == -1)
             break;
@@ -489,9 +495,43 @@ int main (int argc, char *argv[])
             }
             break;
 
-          case 'x':				/* -x for transmit calibration tones. */
+          case 'x':				/* -x N for transmit calibration tones. */
+						/* N is composed of a channel number and/or one letter */
+						/* for the mode: mark, space, alternate, ptt-only. */
 
-	    xmit_calibrate_option = 1;
+	    for (char *p = optarg; *p != '\0'; p++ ) {
+	      switch (*p) {
+	      case '0':
+	      case '1':
+	      case '2':
+	      case '3':
+	      case '4':
+	      case '5':
+	      case '6':
+	      case '7':
+	      case '8':
+	      case '9':
+	        x_opt_chan = x_opt_chan * 10 + *p - '0';
+	        if (x_opt_mode == ' ') x_opt_mode = 'a';
+	        break;
+	      case 'a':  x_opt_mode = *p; break; // Alternating tones
+	      case 'm':  x_opt_mode = *p; break; // Mark tone
+	      case 's':  x_opt_mode = *p; break; // Space tone
+	      case 'p':  x_opt_mode = *p; break; // Set PTT only
+      	      default:
+	        text_color_set(DW_COLOR_ERROR);
+	        dw_printf ("Invalid option '%c' for -x. Must be a, m, s, or p.\n", *p);
+	        text_color_set(DW_COLOR_INFO);
+      	    	exit (EXIT_FAILURE);
+      	    	break;
+      	     }
+	    }
+	    if (x_opt_chan < 0 || x_opt_chan >= MAX_CHANS) {
+	      text_color_set(DW_COLOR_ERROR);
+	      dw_printf ("Invalid channel %d for -x. \n", x_opt_chan);
+	      text_color_set(DW_COLOR_INFO);
+	      exit (EXIT_FAILURE);
+	    }
             break;
 
           case 'r':				/* -r audio samples/sec.  e.g. 44100 */
@@ -566,6 +606,7 @@ int main (int argc, char *argv[])
 	      case 'h':  d_h_opt++; break;			// Hamlib verbose level.
 #endif
 	      case 'x':  d_x_opt++; break;			// FX.25
+	      case 'd':	 aprstt_debug++; break;			// APRStt (mnemonic Dtmf)
 	      default: break;
 	     }
 	    }
@@ -758,7 +799,7 @@ int main (int argc, char *argv[])
 						// Will make more precise in afsk demod init.
 	    audio_config.achan[0].mark_freq = 2083;	// Actually 2083.3 - logic 1.
 	    audio_config.achan[0].space_freq = 1563;	// Actually 1562.5 - logic 0.
-	    strlcpy (audio_config.achan[0].profiles, "D", sizeof(audio_config.achan[0].profiles));
+	    strlcpy (audio_config.achan[0].profiles, "A", sizeof(audio_config.achan[0].profiles));
 	  }
 	  else {
             audio_config.achan[0].modem_type = MODEM_SCRAMBLE;
@@ -883,7 +924,7 @@ int main (int argc, char *argv[])
  * Initialize the touch tone decoder & APRStt gateway.
  */
 	dtmf_init (&audio_config, audio_amplitude);
-	aprs_tt_init (&tt_config);
+	aprs_tt_init (&tt_config, aprstt_debug);
 	tt_user_init (&audio_config, &tt_config);
 
 /*
@@ -905,29 +946,76 @@ int main (int argc, char *argv[])
 	xmit_init (&audio_config, d_p_opt);
 
 /*
- * If -x option specified, transmit alternating tones for transmitter
+ * If -x N option specified, transmit calibration tones for transmitter
  * audio level adjustment, up to 1 minute then quit.
- * TODO:  enhance for more than one channel.
+ * a: Alternating mark/space tones
+ * m: Mark tone (e.g. 1200Hz)
+ * s: Space tone (e.g. 2200Hz)
+ * p: Set PTT only.
+ * A leading or trailing number is the channel.
  */
 
-	if (xmit_calibrate_option) {
+	if (x_opt_mode != ' ') {
+	  if (audio_config.achan[x_opt_chan].medium == MEDIUM_RADIO) {
+		if (audio_config.achan[x_opt_chan].mark_freq
+				&& audio_config.achan[x_opt_chan].space_freq) {
+			int max_duration = 60;
+			int n = audio_config.achan[x_opt_chan].baud * max_duration;
 
-	  int max_duration = 60;  /* seconds */
-	  int n = audio_config.achan[0].baud * max_duration;
-	  int chan = 0;
-	
-	  text_color_set(DW_COLOR_INFO);
-	  dw_printf ("\nSending transmit calibration tones.  Press control-C to terminate.\n");
+			text_color_set(DW_COLOR_INFO);
+			ptt_set(OCTYPE_PTT, x_opt_chan, 1);
 
-	  ptt_set (OCTYPE_PTT, chan, 1);
-	  while (n-- > 0) {
+			switch (x_opt_mode) {
+			default:
+			case 'a':  // Alternating tones: -x a
+				dw_printf("\nSending alternating mark/space calibration tones (%d/%dHz) on channel %d.\nPress control-C to terminate.\n",
+						audio_config.achan[x_opt_chan].mark_freq,
+						audio_config.achan[x_opt_chan].space_freq,
+						x_opt_chan);
+				while (n-- > 0) {
+					tone_gen_put_bit(x_opt_chan, n & 1);
+				}
+				break;
+			case 'm':  // "Mark" tone: -x m
+				dw_printf("\nSending mark calibration tone (%dHz) on channel %d.\nPress control-C to terminate.\n",
+						audio_config.achan[x_opt_chan].mark_freq,
+						x_opt_chan);
+				while (n-- > 0) {
+					tone_gen_put_bit(x_opt_chan, 0);
+				}
+				break;
+			case 's':  // "Space" tone: -x s
+				dw_printf("\nSending space calibration tone (%dHz) on channel %d.\nPress control-C to terminate.\n",
+						audio_config.achan[x_opt_chan].space_freq,
+						x_opt_chan);
+				while (n-- > 0) {
+					tone_gen_put_bit(x_opt_chan, 1);
+				}
+				break;
+			case 'p':  // Silence - set PTT only: -x p
+				dw_printf("\nSending silence (Set PTT only) on channel %d.\nPress control-C to terminate.\n", x_opt_chan);
+				SLEEP_SEC(max_duration);
+				break;
+			}
 
-	    tone_gen_put_bit (chan, n & 1);
+			ptt_set(OCTYPE_PTT, x_opt_chan, 0);
+			text_color_set(DW_COLOR_INFO);
+			exit(EXIT_SUCCESS);
 
-	  }
-	  ptt_set (OCTYPE_PTT, chan, 0);
-	  exit (0);
+		} else {
+			text_color_set(DW_COLOR_ERROR);
+			dw_printf("\nMark/Space frequencies not defined for channel %d. Cannot calibrate using this modem type.\n", x_opt_chan);
+			text_color_set(DW_COLOR_INFO);
+			exit(EXIT_FAILURE);
+		}
+	    } else {
+		text_color_set(DW_COLOR_ERROR);
+		dw_printf("\nChannel %d is not configured as a radio channel.\n", x_opt_chan);
+		text_color_set(DW_COLOR_INFO);
+		exit(EXIT_FAILURE);
+	    }
 	}
+
 
 /*
  * Initialize the digipeater and IGate functions.
@@ -943,6 +1031,11 @@ int main (int argc, char *argv[])
  */
 	server_init (&audio_config, &misc_config);
 	kissnet_init (&misc_config);
+
+#if (USE_AVAHI_CLIENT|USE_MACOS_DNSSD)
+	if (misc_config.kiss_port > 0 && misc_config.dns_sd_enabled)
+	  dns_sd_announce(&misc_config);
+#endif
 
 /*
  * Create a pseudo terminal and KISS TNC emulator.
@@ -1112,6 +1205,11 @@ void app_process_rec_packet (int chan, int subchan, int slice, packet_t pp, alev
 
 	  text_color_set(DW_COLOR_ERROR);
 	  dw_printf ("Audio input level is too high.  Reduce so most stations are around 50.\n");
+	}
+	else if (alevel.rec < 5) {
+
+	  text_color_set(DW_COLOR_ERROR);
+	  dw_printf ("Audio input level is too low.  Increase so most stations are around 50.\n");
 	}
 
 
@@ -1325,10 +1423,10 @@ void app_process_rec_packet (int chan, int subchan, int slice, packet_t pp, alev
 
 	flen = ax25_pack(pp, fbuf);
 
-	server_send_rec_packet (chan, pp, fbuf, flen);				// AGW net protocol
-	kissnet_send_rec_packet (chan, KISS_CMD_DATA_FRAME, fbuf, flen, -1);	// KISS TCP
-	kissserial_send_rec_packet (chan, KISS_CMD_DATA_FRAME, fbuf, flen, -1);	// KISS serial port
-	kisspt_send_rec_packet (chan, KISS_CMD_DATA_FRAME, fbuf, flen, -1);	// KISS pseudo terminal
+	server_send_rec_packet (chan, pp, fbuf, flen);					// AGW net protocol
+	kissnet_send_rec_packet (chan, KISS_CMD_DATA_FRAME, fbuf, flen, NULL, -1);	// KISS TCP
+	kissserial_send_rec_packet (chan, KISS_CMD_DATA_FRAME, fbuf, flen, NULL, -1);	// KISS serial port
+	kisspt_send_rec_packet (chan, KISS_CMD_DATA_FRAME, fbuf, flen, NULL, -1);	// KISS pseudo terminal
 
 	if (A_opt_ais_to_obj && strlen(ais_obj_packet) != 0) {
 	  packet_t ao_pp = ax25_from_text (ais_obj_packet, 1);
@@ -1337,25 +1435,31 @@ void app_process_rec_packet (int chan, int subchan, int slice, packet_t pp, alev
 	    int ao_flen = ax25_pack(ao_pp, ao_fbuf);
 
 	    server_send_rec_packet (chan, ao_pp, ao_fbuf, ao_flen);
-	    kissnet_send_rec_packet (chan, KISS_CMD_DATA_FRAME, ao_fbuf, ao_flen, -1);
-	    kissserial_send_rec_packet (chan, KISS_CMD_DATA_FRAME, ao_fbuf, ao_flen, -1);
-	    kisspt_send_rec_packet (chan, KISS_CMD_DATA_FRAME, ao_fbuf, ao_flen, -1);
+	    kissnet_send_rec_packet (chan, KISS_CMD_DATA_FRAME, ao_fbuf, ao_flen, NULL, -1);
+	    kissserial_send_rec_packet (chan, KISS_CMD_DATA_FRAME, ao_fbuf, ao_flen, NULL, -1);
+	    kisspt_send_rec_packet (chan, KISS_CMD_DATA_FRAME, ao_fbuf, ao_flen, NULL, -1);
 	    ax25_delete (ao_pp);
 	  }
 	}
 
 /* 
- * If it came from DTMF decoder, send it to APRStt gateway.
+ * If it came from DTMF decoder (subchan == -1), send it to APRStt gateway.
  * Otherwise, it is a candidate for IGate and digipeater.
  *
- * TODO: It would be useful to have some way to simulate touch tone
+ * It is also useful to have some way to simulate touch tone
  * sequences with BEACON sendto=R0 for testing.
  */
 
-	if (subchan == -1) {
+	if (subchan == -1) {		// from DTMF decoder
 	  if (tt_config.gateway_enabled && info_len >= 2) {
 	    aprs_tt_sequence (chan, (char*)(pinfo+1));
 	  }
+	}
+	else if (*pinfo == 't' && info_len >= 2 && tt_config.gateway_enabled) {
+				// For testing.
+				// Would be nice to verify it was generated locally,
+				// not received over the air.
+	  aprs_tt_sequence (chan, (char*)(pinfo+1));
 	}
 	else { 
 	
@@ -1487,6 +1591,7 @@ static void usage (char **argv)
 	dw_printf ("       h             h = hamlib increase verbose level.\n");
 #endif
 	dw_printf ("       x             x = FX.25 increase verbose level.\n");
+	dw_printf ("       d             d = APRStt (DTMF to APRS object translation).\n");
 	dw_printf ("    -q             Quiet (suppress output) options:\n");
 	dw_printf ("       h             h = Heard line with the audio level.\n");
 	dw_printf ("       d             d = Decoding of APRS packets.\n");
@@ -1499,6 +1604,11 @@ static void usage (char **argv)
 	dw_printf ("    -p             Enable pseudo terminal for KISS protocol.\n");
 #endif
 	dw_printf ("    -x             Send Xmit level calibration tones.\n");
+	dw_printf ("       a             a = Alternating mark/space tones.\n");
+	dw_printf ("       m             m = Steady mark tone (e.g. 1200Hz).\n");
+	dw_printf ("       s             s = Steady space tone (e.g. 2200Hz).\n");
+	dw_printf ("       p             p = Silence (Set PTT only).\n");
+	dw_printf ("        chan          Optionally add a number to specify radio channel.\n");
 	dw_printf ("    -u             Print UTF-8 test string and exit.\n");
 	dw_printf ("    -S             Print symbol tables and exit.\n");
 	dw_printf ("    -T fmt         Time stamp format for sent and received frames.\n");
@@ -1516,6 +1626,7 @@ static void usage (char **argv)
 	dw_printf ("Complete documentation can be found in /usr/local/share/doc/direwolf\n");
 #endif
 	dw_printf ("or online at https://github.com/wb2osz/direwolf/tree/master/doc\n");
+	text_color_set(DW_COLOR_INFO);
 	exit (EXIT_FAILURE);
 }
 
